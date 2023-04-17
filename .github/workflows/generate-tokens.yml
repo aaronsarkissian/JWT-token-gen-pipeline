@@ -1,0 +1,102 @@
+name: Generate JWT Tokens
+
+on:
+  # schedule:
+    # Runs at 03:30, on day 01 of the month, only in March, June, September, and December.
+    # - cron:  '30 03 01 3,6,9,12 *'
+  workflow_dispatch:
+
+# For Azure Login
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  generate-token:
+    runs-on: ubuntu-latest
+    outputs:
+      ENCRYPTED_MOBILE_TOKEN: ${{ steps.tokens.outputs.ENCRYPTED_MOBILE_TOKEN }}
+      ENCRYPTED_WEB_TOKEN: ${{ steps.tokens.outputs.ENCRYPTED_WEB_TOKEN }}
+    strategy:
+      fail-fast: true
+      matrix:
+        environment: [MOBILE, WEB]
+    environment: ${{ matrix.environment }}
+    env:
+      PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+      TEAM_ID: ${{ secrets.TEAM_ID }}
+      CLIENT_ID: ${{ vars.CLIENT_ID }}
+      KEY_ID: ${{ secrets.KEY_ID }}
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: "Generate Tokens"
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.0"
+          bundler-cache: true
+
+      - id: tokens
+        run: |
+          echo "$(echo ENCRYPTED_${{ matrix.environment }}_TOKEN | tr '[:lower:]' '[:upper:]')=$(gpg --symmetric --batch --passphrase "${{ secrets.GPG_PASSPHRASE }}" --output - <(echo "$(bundle exec ruby gen-token.rb)") | base64 -w0)" >> $GITHUB_OUTPUT
+
+  set-tokens:
+    runs-on: ubuntu-latest
+    needs: generate-token
+    steps:
+      - run: |
+          echo "MOBILE_TOKEN=$(gpg --decrypt --quiet --batch --passphrase "${{ secrets.GPG_PASSPHRASE }}" --output - <(echo "${{ needs.generate-token.outputs.ENCRYPTED_MOBILE_TOKEN }}" | base64 --decode))" >> $GITHUB_ENV
+          echo "WEB_TOKEN=$(gpg --decrypt --quiet --batch --passphrase "${{ secrets.GPG_PASSPHRASE }}" --output - <(echo "${{ needs.generate-token.outputs.ENCRYPTED_WEB_TOKEN }}" | base64 --decode))" >> $GITHUB_ENV
+
+      - name: "Azure OIDC login"
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: "Set key-vault values"
+        uses: azure/CLI@v1
+        with:
+          inlineScript: |
+            az keyvault secret set --vault-name "service1-dev-kv" --name "Credentials--ClientSecret" --value "${{ env.MOBILE_TOKEN }}"
+            az keyvault secret set --vault-name "service1-dev-kv" --name "CredentialsWeb--ClientSecret" --value "${{ env.WEB_TOKEN }}"
+            az keyvault secret set --vault-name "service1-preprod-kv" --name "Credentials--ClientSecret" --value "${{ env.MOBILE_TOKEN }}"
+            az keyvault secret set --vault-name "service1-preprod-kv" --name "CredentialsWeb--ClientSecret" --value "${{ env.WEB_TOKEN }}"
+            az keyvault secret set --vault-name "service1-prod-kv" --name "Credentials--ClientSecret" --value "${{ env.MOBILE_TOKEN }}"
+            az keyvault secret set --vault-name "service1-prod-kv" --name "CredentialsWeb--ClientSecret" --value "${{ env.WEB_TOKEN }}"
+            az keyvault secret set --vault-name "service2-dev-kv" --name "ExternalServices--Credentials--clientSecret" --value "${{ env.MOBILE_TOKEN }}"
+            az keyvault secret set --vault-name "service2-preprod-kv" --name "ExternalServices--Credentials--clientSecret" --value "${{ env.MOBILE_TOKEN }}"
+            az keyvault secret set --vault-name "service2-prod-kv" --name "ExternalServices--Credentials--clientSecret" --value "${{ env.MOBILE_TOKEN }}"
+
+  restart-stage-pods:
+    runs-on: [self-hosted] # Self Hosted GitHub Runner where argocd is installed
+    needs: [generate-token, set-tokens]
+    steps:
+      - name: ArgoCD login Stage
+        run: argocd login stage-argocd.example.com --username ${{ vars.ARGOCD_USERNAME_STAGE }} --password ${{ secrets.ARGOCD_PASSWORD_STAGE }} --grpc-web
+
+      - name: Delete Dev/PreProd pods
+        run: |
+          argocd app actions run dev-${{ env.SVC_ONE }} restart --kind Deployment --namespace dev --grpc-web
+          argocd app actions run preprod-${{ env.SVC_ONE }} restart --kind Deployment --namespace preprod --grpc-web
+          argocd app actions run dev-${{ env.SVC_TWO }} restart --kind Deployment --namespace dev --grpc-web
+          argocd app actions run preprod-${{ env.SVC_TWO }} restart --kind Deployment --namespace preprod --grpc-web
+        env:
+          SVC_ONE: service1
+          SVC_TWO: service2
+
+  restart-prod-pods:
+    runs-on: [self-hosted] # Self Hosted GitHub Runner where argocd is installed
+    needs: [generate-token, set-tokens]
+    steps:
+      - name: ArgoCD login Prod
+        run: argocd login argocd.example.com --username ${{ vars.ARGOCD_USERNAME_PROD }} --password ${{ secrets.ARGOCD_PASSWORD_PROD }} --grpc-web
+
+      - name: Delete Prod pods
+        run: |
+          argocd app actions run prod-${{ env.SVC_ONE }} restart --kind Deployment --namespace production --grpc-web
+          argocd app actions run prod-${{ env.SVC_TWO }} restart --kind Deployment --namespace production --grpc-web
+        env:
+          SVC_ONE: service1
+          SVC_TWO: service2
