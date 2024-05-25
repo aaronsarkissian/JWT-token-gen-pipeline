@@ -2,8 +2,8 @@ name: Generate JWT Tokens
 
 on:
   # schedule:
-    # Runs at 03:30, on day 01 of the month, only in March, June, September, and December.
-    # - cron:  '30 03 01 3,6,9,12 *'
+  # Runs at 03:30, on day 01 of the month, only in March, June, September, and December.
+  # - cron:  '30 03 01 3,6,9,12 *'
   workflow_dispatch:
 
 # For Azure Login
@@ -28,7 +28,7 @@ jobs:
       CLIENT_ID: ${{ vars.CLIENT_ID }}
       KEY_ID: ${{ secrets.KEY_ID }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: "Generate Tokens"
         uses: ruby/setup-ruby@v1
@@ -49,14 +49,14 @@ jobs:
           echo "WEB_TOKEN=$(gpg --decrypt --quiet --batch --passphrase "${{ secrets.GPG_PASSPHRASE }}" --output - <(echo "${{ needs.generate-token.outputs.ENCRYPTED_WEB_TOKEN }}" | base64 --decode))" >> $GITHUB_ENV
 
       - name: "Azure OIDC login"
-        uses: azure/login@v1
+        uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: "Set key-vault values"
-        uses: azure/CLI@v1
+        uses: azure/cli@v2
         with:
           inlineScript: |
             az keyvault secret set --vault-name "service1-dev-kv" --name "Credentials--ClientSecret" --value "${{ env.MOBILE_TOKEN }}"
